@@ -1,0 +1,177 @@
+---
+title: "NMF_simulations"
+author: "Jared Slosberg"
+date: "3/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load, message = F}
+require(splatter)
+require(scater)
+require(NNLM)
+require(ComplexHeatmap)
+require(circlize)
+require(assertthat)
+library(dplyr)
+library(purrr)
+
+library(monocle3)
+
+movingAverage <- function(x, n){stats::filter(x, rep(1 / n, n), sides = 2)}
+```
+
+
+```{r run_simulation, echo=T}
+# cds <- readRDS("/data/users/jared/simulated_scRNA/splatter_simulation/6month_LMMP.rds")
+# cds <- cds[fData(cds)$num_cells_expressed > 100]
+# cds <- cds[sample(dim(cds)[1], 1000), sample(dim(cds)[2], 5000)]
+# 
+# 
+# params_est <- splatEstimate(as.matrix(counts(cds)))
+
+
+num_cells <- 1000
+num_genes <- 4000
+params_branching <- newSplatParams(batchCells = num_cells, nGenes = num_genes)
+params_branching <- setParams(params_branching, list("seed" =  939,
+                                                     "lib.loc" = 10,
+                                                     "lib.scale" = 1)) #increasing this from default (0.2) improves modularity of NMF signatures. more diversity.
+
+set.seed(842)
+sim_path_sce <- splatSimulate(params_branching,
+                                    method = "groups",
+                                    group.prob = rep(0.25,4),
+                                    de.prob = 0.2)
+sim_path_sce <- scater::logNormCounts(sim_path_sce)
+sim_path_sce <- runPCA(sim_path_sce)
+plotReducedDim(sim_path_sce, dimred = "PCA")
+
+sim_path_sce <- runUMAP(sim_path_sce, ncomponents = 50)
+plotReducedDim(sim_path_sce, dimred = "UMAP", colour_by = "Group")
+```
+
+```{r run_NMF, echo = T}
+num_patterns <- 20
+nnmf_res <- nnmf(logcounts(sim_path_sce), k = num_patterns, verbose = T)
+
+gene_weights <- nnmf_res$W
+colnames(gene_weights) <- paste0("NMF_pattern",1:num_patterns)
+assert_that(rownames(gene_weights) == rownames(rowData(sim_path_sce)) && T)
+rowData(sim_path_sce) <- cbind(rowData(sim_path_sce), gene_weights)
+
+cell_weights <- t(nnmf_res$H)
+colnames(cell_weights) <- paste0("NMF_pattern",1:num_patterns)
+assert_that(rownames(cell_weights) == rownames(colData(sim_path_sce)) && T)
+colData(sim_path_sce) <- cbind(colData(sim_path_sce), cell_weights)
+
+gene_color_scale <- circlize::colorRamp2(quantile(gene_weights, c(0,.5,0.99)), c("grey","orange","red"))
+cell_color_scale <- circlize::colorRamp2(quantile(cell_weights, c(0,.5,0.99)), c("grey","orange","red"))
+
+
+
+ComplexHeatmap::Heatmap(gene_weights,
+                        name = "gene_weights",
+                        col = gene_color_scale,
+                        row_names_gp = gpar(fontsize = 4))
+ComplexHeatmap::Heatmap(cell_weights,
+                        name = "cell_weights",
+                        col = cell_color_scale,
+                        row_names_gp = gpar(fontsize = 4))
+```
+
+```{r plot_NMF_usage}
+pattern_usage_plots <-lapply(1:num_patterns, function(pattern_no){
+  plotReducedDim(sim_path_sce, dimred = "UMAP", colour_by = paste0("NMF_pattern",pattern_no))
+})
+
+print(pattern_usage_plots)
+
+```
+
+```{r from_NMF_to_expression}
+
+num_cells <- 100
+num_genes <- 500
+
+gene_weights_fake_list <- purrr::map(1:num_patterns, function(pattern_no){
+  spacer <- num_genes/num_patterns
+  vec <- rep(0, num_genes)
+  vec[((pattern_no-1)*spacer+1):(pattern_no*spacer)] <- 10
+  return(vec)
+})
+gene_weights_fake <- gene_weights_fake_list %>% dplyr::bind_cols() %>% as.matrix()
+gene_weights_smooth<- apply(gene_weights_fake, MARGIN = 2,  function(x){zoo::rollmean(x, 50, fill = 0)})
+colnames(gene_weights_fake) <- paste0("fake_pattern",1:num_patterns)
+
+number_patterns_used <- 2
+cell_weights_fake_list <- purrr::map(1:num_patterns, function(pattern_no){
+  spacer <- num_cells/num_patterns
+  vec <- rep(0, num_cells)
+  
+  start_ind <- ((pattern_no-2)*spacer+1)
+  stop_ind <- (pattern_no*spacer)
+  vec[max(0, start_ind):stop_ind] <- 10
+  return(vec)
+})
+cell_weights_fake <- cell_weights_fake_list %>% dplyr::bind_cols() %>% as.matrix()
+cell_weights_smooth <- apply(cell_weights_fake, MARGIN = 2,  function(x){zoo::rollmean(x, 50, fill = 0)})
+colnames(cell_weights_fake) <- paste0("fake_pattern",1:num_patterns)
+
+gene_color_scale <- circlize::colorRamp2(quantile(gene_weights_smooth, c(0,.5,0.99)), c("grey","orange","red"))
+cell_color_scale <- circlize::colorRamp2(quantile(cell_weights_fake, c(0,.5,0.99)), c("grey","orange","red"))
+
+
+ComplexHeatmap::Heatmap(gene_weights_fake,
+                        name = "gene_weights",
+                        col = gene_color_scale,
+                        row_names_gp = gpar(fontsize = 4))
+ComplexHeatmap::Heatmap(cell_weights_fake,
+                        name = "cell_weights",
+                        col = cell_color_scale,
+                        row_names_gp = gpar(fontsize = 4))
+
+exprs <- gene_weights_fake %*% t(cell_weights_fake)
+smooth_exprs<- gene_weights_smooth %*% t(cell_weights_smooth)
+
+fake_sce <- SingleCellExperiment(assays = list(counts = exprs))
+# colData(fake_sce) <- colData(sim_path_sce)[,c("Cell","Batch","Group","ExpLibSize","sizeFactor")]
+# rowData(fake_sce) <- rowData(sim_path_sce)[,c("Gene","BaseGeneMean","OutlierFactor","GeneMean")]
+
+
+# colnames(gene_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
+# assert_that(rownames(gene_weights_fake) == rownames(rowData(fake_sce)) && T)
+rowData(fake_sce) <- cbind(rowData(fake_sce), gene_weights_fake)
+
+# colnames(cell_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
+# assert_that(rownames(cell_weights) == rownames(colData(fake_sce)) && T)
+colData(fake_sce) <- cbind(colData(fake_sce), cell_weights_fake)
+
+
+fake_sce <- scater::logNormCounts(fake_sce)
+fake_sce <- runPCA(fake_sce)
+plotReducedDim(fake_sce, dimred = "PCA")
+
+fake_sce <- runUMAP(fake_sce, ncomponents = 50)
+plotReducedDim(fake_sce, dimred = "UMAP")
+
+ComplexHeatmap::Heatmap(exprs)
+
+
+```
+
+```{r plot_NMF_usage_fake}
+pattern_usage_plots <-lapply(1:num_patterns, function(pattern_no){
+  plotReducedDim(fake_sce, dimred = "UMAP", colour_by = paste0("fake_pattern",pattern_no))
+})
+
+print(pattern_usage_plots)
+
+```
+
+
+

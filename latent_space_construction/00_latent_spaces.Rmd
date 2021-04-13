@@ -1,0 +1,140 @@
+---
+title: "NMF_simulations"
+author: "Jared Slosberg"
+date: "3/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load, message = F}
+
+require(scater)
+require(NNLM)
+require(ComplexHeatmap)
+require(circlize)
+require(assertthat)
+library(dplyr)
+library(purrr)
+
+library(monocle3)
+
+movingAverage <- function(x, n){stats::filter(x, rep(1 / n, n), sides = 2, circular = T)}
+```
+
+
+#Can I construct the patterns in the latent space and use matrix multiplication to reconstruct the corresponding genes expression matrices?
+```{r from_NMF_to_expression}
+num_patterns <- 4
+number_patterns_used <- 2
+step <- (num_patterns+number_patterns_used-1)
+
+#num_cells must be divisible by step
+num_cells <- step*20
+num_genes <- 500
+
+gene_weights_fake_list <- purrr::map(1:num_patterns, function(pattern_no){
+  spacer <- num_genes/num_patterns
+  vec <- rep(0, num_genes)
+  vec[((pattern_no-1)*spacer+1):(pattern_no*spacer)] <- 10
+  return(vec)
+})
+gene_weights_fake <- gene_weights_fake_list %>% dplyr::bind_cols() %>% as.matrix()
+# gene_weights_smooth<- apply(gene_weights_fake, MARGIN = 2,  function(x){zoo::rollmean(x, 50, fill = 0)})
+colnames(gene_weights_fake) <- paste0("fake_pattern",1:num_patterns)
+
+
+cell_weights_fake_list <- purrr::map(1:num_patterns, function(pattern_no){
+  
+  #how many cells between the start of one pattern usage and the start of the next pattern usage
+  spacer <- num_cells/(num_patterns+number_patterns_used-1)
+  
+  vec <- rep(0, num_cells)
+  
+  start_ind <- ((pattern_no-1)*spacer)+1
+  stop_ind <- start_ind + (number_patterns_used*spacer) - 1
+  # stop_ind <- ((pattern_no)*spacer*number_patterns_used)
+  vec[max(0, start_ind):stop_ind] <- 10
+  return(vec)
+})
+cell_weights_fake <- cell_weights_fake_list %>% dplyr::bind_cols() %>% as.matrix()
+cell_weights_smooth <- apply(cell_weights_fake, MARGIN = 2,  function(x){movingAverage(x, 50)})
+colnames(cell_weights_smooth) <- paste0("fake_pattern",1:num_patterns)
+
+gene_color_scale <- circlize::colorRamp2(quantile(gene_weights_fake, c(0,.5,0.99)), c("grey","orange","red"))
+cell_color_scale <- circlize::colorRamp2(quantile(cell_weights_smooth, c(0,.5,0.99)), c("grey","orange","red"))
+
+
+ComplexHeatmap::Heatmap(gene_weights_fake,
+                        name = "gene_weights",
+                        col = gene_color_scale,
+                        row_names_gp = gpar(fontsize = 4), 
+                        cluster_columns = F,
+                        cluster_rows =F)
+ComplexHeatmap::Heatmap(cell_weights_smooth,
+                        name = "cell_weights",
+                        col = cell_color_scale,
+                        row_names_gp = gpar(fontsize = 4),
+                        cluster_columns = F,
+                        cluster_rows= F)
+
+exprs <- gene_weights_fake %*% t(cell_weights_smooth)
+#same cells and genes as in matrix?
+colnames(exprs) <- paste0("cell",1:num_cells)
+rownames(exprs) <- paste0("gene", 1:num_genes)
+# smooth_exprs<- gene_weights_smooth %*% t(cell_weights_smooth)
+
+fake_sce <- SingleCellExperiment(assays = list(counts = exprs))
+
+
+# colnames(gene_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
+# assert_that(rownames(gene_weights_fake) == rownames(rowData(fake_sce)) && T)
+rowData(fake_sce) <- cbind(rowData(fake_sce), gene_weights_fake)
+
+# colnames(cell_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
+# assert_that(rownames(cell_weights) == rownames(colData(fake_sce)) && T)
+colData(fake_sce) <- cbind(colData(fake_sce), cell_weights_smooth)
+
+
+fake_sce <- scater::logNormCounts(fake_sce)
+fake_sce <- runPCA(fake_sce)
+plotReducedDim(fake_sce, dimred = "PCA")
+
+fake_sce <- runUMAP(fake_sce, ncomponents = 50)
+plotReducedDim(fake_sce, dimred = "UMAP")
+
+ComplexHeatmap::Heatmap(exprs, cluster_rows = F, cluster_columns = F)
+
+
+```
+
+```{r plot_NMF_usage_fake}
+pattern_usage_plots <-lapply(1:num_patterns, function(pattern_no){
+  plotReducedDim(fake_sce, dimred = "UMAP", colour_by = paste0("fake_pattern",pattern_no))
+})
+
+print(pattern_usage_plots)
+
+```
+
+```{r fromRealPatterns}
+real_cell_usage <- read.csv("./9_18_TC_LMMP_pattern_cell_weights.csv", row.names = 1) %>% select(cellPattern32, cellPattern33, cellPattern43, cellPattern49)
+
+real_cell_usage_filtered <- purrr:::map_df(real_cell_usage, function(pattern){
+  x <- pattern[order(pattern, decreasing = T)] 
+  x <- x[1:num_cells]
+})
+
+exprs <- gene_weights_fake %*% t(real_cell_usage_filtered)
+#same cells and genes as in matrix?
+colnames(exprs) <- paste0("cell",1:num_cells)
+rownames(exprs) <- paste0("gene", 1:num_genes)
+
+ComplexHeatmap::Heatmap(exprs, cluster_rows = F, cluster_columns = F)
+
+
+```
+
