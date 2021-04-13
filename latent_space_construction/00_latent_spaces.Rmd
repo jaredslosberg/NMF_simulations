@@ -21,6 +21,7 @@ library(dplyr)
 library(purrr)
 library(stringr)
 library(monocle3)
+library(glmpd)
 
 
 ```
@@ -97,7 +98,7 @@ cell_weights_fake <- createCellWeights(num_patterns = no_patterns,
                                        num_patterns_used = no_patterns_used,
                                        num_cells_per_pattern = no_cells_per_pattern,
                                        value = c(0,10),
-                                       circ_smooth_n = 10)
+                                       circ_smooth_n = 50)
 
 gene_weights_fake <- createGeneWeights(num_patterns = no_patterns,
                                        num_genes_per_pattern = no_genes_per_pattern,
@@ -137,6 +138,7 @@ fake_sce <- SingleCellExperiment(assays = list(counts = exprs))
 # colnames(gene_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
 # assert_that(rownames(gene_weights_fake) == rownames(rowData(fake_sce)) && T)
 rowData(fake_sce) <- cbind(rowData(fake_sce), gene_weights_fake)
+rowData(fake_sce)$gene_id <- rownames(fake_sce)
 
 # colnames(cell_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
 # assert_that(rownames(cell_weights) == rownames(colData(fake_sce)) && T)
@@ -144,42 +146,103 @@ colData(fake_sce) <- cbind(colData(fake_sce), cell_weights_fake)
 colData(fake_sce)[,"cell_number"] <- as.integer(str_split_fixed(colnames(fake_sce), "cell",2)[,2]) #integer cell number
 
 
+p1a <- ComplexHeatmap::Heatmap(exprs, cluster_rows = F, cluster_columns = F, column_title = "expression without noise")
+
+
 fake_sce <- scater::logNormCounts(fake_sce)
 fake_sce <- runPCA(fake_sce)
-plotReducedDim(fake_sce, dimred = "PCA", colour_by = "cell_number")
+p2a <- plotReducedDim(fake_sce, dimred = "PCA", colour_by = "cell_number") + ggtitle("PCA embedding without noise")
 
 fake_sce <- runUMAP(fake_sce, ncomponents = 50)
-plotReducedDim(fake_sce, dimred = "UMAP")
+p3a <- plotReducedDim(fake_sce, dimred = "UMAP") + ggtitle("UMAP embedding without noise")
 
-ComplexHeatmap::Heatmap(exprs, cluster_rows = F, cluster_columns = F)
+
+##This time with noise
+noise_mean <- 50
+noise_sd <- 10
+noise <- rnorm(total_cells*total_genes, mean = noise_mean, sd = noise_sd) %>%
+  abs() %>%
+  matrix(., nrow = total_genes, ncol= total_cells)
+
+noisy_exprs <- exprs + noise
+
+noisy_sce <- SingleCellExperiment(assays = list(counts = noisy_exprs))
+
+rowData(noisy_sce) <- cbind(rowData(fake_sce), gene_weights_fake)
+rowData(noisy_sce)$gene_id <- rownames(noisy_sce)
+
+# colnames(cell_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
+# assert_that(rownames(cell_weights) == rownames(colData(fake_sce)) && T)
+colData(noisy_sce) <- cbind(colData(noisy_sce), cell_weights_fake)
+colData(noisy_sce)[,"cell_number"] <- as.integer(str_split_fixed(colnames(noisy_sce), "cell",2)[,2]) #integer cell number
+
+noise_term <- paste0("~ norm(mean = ",noise_mean,", sd = ",noise_sd,")")
+p1b <- ComplexHeatmap::Heatmap(noisy_exprs,
+                               cluster_rows = F,
+                               cluster_columns = F,
+                               column_title = paste0("expression with noise ", noise_term))
+
+
+noisy_sce <- scater::logNormCounts(noisy_sce)
+noisy_sce <- runPCA(noisy_sce)
+p2b <- plotReducedDim(noisy_sce, dimred = "PCA", colour_by = "cell_number") +
+  ggtitle(paste0("PCA embedding with noise ", noise_term))
+
+noisy_sce <- runUMAP(noisy_sce, ncomponents = 50)
+p3b <- plotReducedDim(noisy_sce, dimred = "UMAP") +
+  ggtitle(paste0("UMAP embedding with noise ", noise_term))
+
+p1a
+p2a
+p3a
+p1b
+p2b
+p3b
 
 
 ```
 
 ```{r plot_NMF_usage_fake}
-pattern_usage_plots <-lapply(1:num_patterns, function(pattern_no){
+pattern_usage_plots <-lapply(1:no_patterns, function(pattern_no){
   plotReducedDim(fake_sce, dimred = "UMAP", colour_by = paste0("fake_pattern",pattern_no))
+})
+
+print(pattern_usage_plots)
+
+pattern_usage_plots <-lapply(1:no_patterns, function(pattern_no){
+  plotReducedDim(noisy_sce, dimred = "UMAP", colour_by = paste0("fake_pattern",pattern_no)) + 
+    ggtitle(paste0("UMAP embedding with noise ", noise_term))
 })
 
 print(pattern_usage_plots)
 
 ```
 
-```{r fromRealPatterns, eval = F}
-real_cell_usage <- read.csv("./9_18_TC_LMMP_pattern_cell_weights.csv", row.names = 1) %>% select(cellPattern32, cellPattern33, cellPattern43, cellPattern49)
-
-real_cell_usage_filtered <- purrr:::map_df(real_cell_usage, function(pattern){
-  x <- pattern[order(pattern, decreasing = T)] 
-  x <- x[1:num_cells]
-})
-
-exprs <- gene_weights_fake %*% t(real_cell_usage_filtered)
-#same cells and genes as in matrix?
-colnames(exprs) <- paste0("cell",1:num_cells)
-rownames(exprs) <- paste0("gene", 1:num_genes)
-
-ComplexHeatmap::Heatmap(exprs, cluster_rows = F, cluster_columns = F)
+```{r glmpd, eval = T}
 
 
+model_str <- paste0("~0 + patternWeights + sizeFactor")
+
+#specify parameters for fittings
+exp_family <- "negbinomial"
+
+pattern_wts <- colData(fake_sce) %>% as.data.frame %>% dplyr::select(starts_with("fake_pattern"))
+
+system.time(glm_models_list <- glmpd::fitGLMpd(object = fake_sce,
+                                             model_formula_str = model_str,
+                                             projected_patterns = pattern_wts,
+                                             cores = 1, 
+                                             count_assay = "counts"))
+
+extracted_coefficients_list <- extractCoefficients(glm_models = glm_models_list, genes = rownames(fake_sce))
+
+gene_coefficients_list <- orderCoefficientsByGene(extracted_coefficients_list, filter_significance = NULL, string = NULL)
+
+coefficient_matrix_list <- organizeEstimates(gene_coefficients_list, 
+                                             terms_exact = NULL,  
+                                             terms_match = c("patternWeights", "log10UMI"),
+                                             feature = "estimate",
+                                             transpose = T,
+                                             gene_name = "gene_id")
 ```
 
