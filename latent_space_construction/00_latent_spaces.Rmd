@@ -19,53 +19,94 @@ require(circlize)
 require(assertthat)
 library(dplyr)
 library(purrr)
-
+library(stringr)
 library(monocle3)
 
-movingAverage <- function(x, n){stats::filter(x, rep(1 / n, n), sides = 2, circular = T)}
+
 ```
 
+```{r, echo = F}
+#define modulo for 1 indexed vectors
+pred <- function(n) n - 1L
+succ <- function(n) n + 1L
+`%mod1%` <- function(m, n) succ(pred(m) %% n) # modulo from 1
 
+movingAverage <- function(x, n){stats::filter(x, rep(1 / n, n), sides = 2, circular = T)}
+
+#TODO: rewrite as cell weights so that genes can be reused?
+createGeneWeights <- function(num_patterns, num_genes_per_pattern, value = c(0,1), circ_smooth_n = NULL){
+  gene_weights__list <- purrr::map(1:num_patterns, function(pattern_no){
+  
+    num_genes <- num_patterns * num_genes_per_pattern
+    
+    #number of genes 
+    spacer <- num_genes_per_pattern
+    
+    #initialize zeros of proper length
+    vec <- rep(value[1], num_genes)
+    
+    vec[((pattern_no-1)*spacer+1):(pattern_no*spacer)] <- value[2]
+  return(vec)
+  })
+  
+  gene_weights<- gene_weights__list %>% dplyr::bind_cols() %>% as.matrix()
+  colnames(gene_weights) <- paste0("fake_pattern",1:num_patterns)
+  
+  if(!is.null(circ_smooth_n)){
+    gene_weights <- apply(gene_weights, MARGIN = 2,  function(x){movingAverage(x, circ_smooth_n)})
+
+  }
+  return(gene_weights)
+  
+}
+
+createCellWeights <- function(num_patterns, num_patterns_used, num_cells_per_pattern, value = c(0,1), circ_smooth_n = NULL){
+  cell_weights_list <- purrr::map(1:num_patterns, function(pattern_no){
+  
+    #define indices for columns to be non-zero
+    pattern_ind_vec <- pattern_no:(pattern_no + num_patterns_used - 1) %mod1% num_patterns
+    
+    mat <- matrix(data = value[1], num_cells_per_pattern,num_patterns)
+    mat[,pattern_ind_vec] <- value[2]
+  
+  return(mat)
+  })
+  
+  cell_weights <- cell_weights_list %>% do.call(rbind, . )
+  colnames(cell_weights) <- paste0("fake_pattern",1:num_patterns)
+  
+  if(!is.null(circ_smooth_n)){
+    cell_weights <- apply(cell_weights, MARGIN = 2,  function(x){movingAverage(x, circ_smooth_n)})
+   
+  }
+  return(cell_weights)
+}
+
+```
 #Can I construct the patterns in the latent space and use matrix multiplication to reconstruct the corresponding genes expression matrices?
 ```{r from_NMF_to_expression}
-num_patterns <- 4
-number_patterns_used <- 2
-step <- (num_patterns+number_patterns_used-1)
+no_patterns <- 4
+no_patterns_used <- 2
 
-#num_cells must be divisible by step
-num_cells <- step*20
-num_genes <- 500
+no_cells_per_pattern <- 20
+total_cells <- no_patterns * no_cells_per_pattern
+no_genes_per_pattern <- 100
+total_genes <- no_patterns * no_genes_per_pattern
 
-gene_weights_fake_list <- purrr::map(1:num_patterns, function(pattern_no){
-  spacer <- num_genes/num_patterns
-  vec <- rep(0, num_genes)
-  vec[((pattern_no-1)*spacer+1):(pattern_no*spacer)] <- 10
-  return(vec)
-})
-gene_weights_fake <- gene_weights_fake_list %>% dplyr::bind_cols() %>% as.matrix()
-# gene_weights_smooth<- apply(gene_weights_fake, MARGIN = 2,  function(x){zoo::rollmean(x, 50, fill = 0)})
-colnames(gene_weights_fake) <- paste0("fake_pattern",1:num_patterns)
+cell_weights_fake <- createCellWeights(num_patterns = no_patterns,
+                                       num_patterns_used = no_patterns_used,
+                                       num_cells_per_pattern = no_cells_per_pattern,
+                                       value = c(0,10),
+                                       circ_smooth_n = 10)
 
+gene_weights_fake <- createGeneWeights(num_patterns = no_patterns,
+                                       num_genes_per_pattern = no_genes_per_pattern,
+                                       value = c(0,10),
+                                       circ_smooth_n = NULL)
 
-cell_weights_fake_list <- purrr::map(1:num_patterns, function(pattern_no){
-  
-  #how many cells between the start of one pattern usage and the start of the next pattern usage
-  spacer <- num_cells/(num_patterns+number_patterns_used-1)
-  
-  vec <- rep(0, num_cells)
-  
-  start_ind <- ((pattern_no-1)*spacer)+1
-  stop_ind <- start_ind + (number_patterns_used*spacer) - 1
-  # stop_ind <- ((pattern_no)*spacer*number_patterns_used)
-  vec[max(0, start_ind):stop_ind] <- 10
-  return(vec)
-})
-cell_weights_fake <- cell_weights_fake_list %>% dplyr::bind_cols() %>% as.matrix()
-cell_weights_smooth <- apply(cell_weights_fake, MARGIN = 2,  function(x){movingAverage(x, 50)})
-colnames(cell_weights_smooth) <- paste0("fake_pattern",1:num_patterns)
 
 gene_color_scale <- circlize::colorRamp2(quantile(gene_weights_fake, c(0,.5,0.99)), c("grey","orange","red"))
-cell_color_scale <- circlize::colorRamp2(quantile(cell_weights_smooth, c(0,.5,0.99)), c("grey","orange","red"))
+cell_color_scale <- circlize::colorRamp2(quantile(cell_weights_fake, c(0,.5,0.99)), c("grey","orange","red"))
 
 
 ComplexHeatmap::Heatmap(gene_weights_fake,
@@ -74,19 +115,22 @@ ComplexHeatmap::Heatmap(gene_weights_fake,
                         row_names_gp = gpar(fontsize = 4), 
                         cluster_columns = F,
                         cluster_rows =F)
-ComplexHeatmap::Heatmap(cell_weights_smooth,
+ComplexHeatmap::Heatmap(cell_weights_fake,
                         name = "cell_weights",
                         col = cell_color_scale,
                         row_names_gp = gpar(fontsize = 4),
                         cluster_columns = F,
                         cluster_rows= F)
 
-exprs <- gene_weights_fake %*% t(cell_weights_smooth)
+exprs <- gene_weights_fake %*% t(cell_weights_fake)
 #same cells and genes as in matrix?
-colnames(exprs) <- paste0("cell",1:num_cells)
-rownames(exprs) <- paste0("gene", 1:num_genes)
+colnames(exprs) <- paste0("cell",1:total_cells)
+rownames(exprs) <- paste0("gene", 1:total_genes)
 # smooth_exprs<- gene_weights_smooth %*% t(cell_weights_smooth)
 
+```
+
+```{r dimRed}
 fake_sce <- SingleCellExperiment(assays = list(counts = exprs))
 
 
@@ -96,12 +140,13 @@ rowData(fake_sce) <- cbind(rowData(fake_sce), gene_weights_fake)
 
 # colnames(cell_weights_fake) <- paste0("NMF_pattern",1:num_patterns)
 # assert_that(rownames(cell_weights) == rownames(colData(fake_sce)) && T)
-colData(fake_sce) <- cbind(colData(fake_sce), cell_weights_smooth)
+colData(fake_sce) <- cbind(colData(fake_sce), cell_weights_fake)
+colData(fake_sce)[,"cell_number"] <- as.integer(str_split_fixed(colnames(fake_sce), "cell",2)[,2]) #integer cell number
 
 
 fake_sce <- scater::logNormCounts(fake_sce)
 fake_sce <- runPCA(fake_sce)
-plotReducedDim(fake_sce, dimred = "PCA")
+plotReducedDim(fake_sce, dimred = "PCA", colour_by = "cell_number")
 
 fake_sce <- runUMAP(fake_sce, ncomponents = 50)
 plotReducedDim(fake_sce, dimred = "UMAP")
@@ -120,7 +165,7 @@ print(pattern_usage_plots)
 
 ```
 
-```{r fromRealPatterns}
+```{r fromRealPatterns, eval = F}
 real_cell_usage <- read.csv("./9_18_TC_LMMP_pattern_cell_weights.csv", row.names = 1) %>% select(cellPattern32, cellPattern33, cellPattern43, cellPattern49)
 
 real_cell_usage_filtered <- purrr:::map_df(real_cell_usage, function(pattern){
