@@ -238,9 +238,9 @@ extracted_coefficients_list <- extractCoefficients(glm_models = glm_models_list,
 
 gene_coefficients_list <- orderCoefficientsByGene(extracted_coefficients_list, filter_significance = NULL, string = NULL)
 
-coefficient_matrix_list <- organizeEstimates(gene_coefficients_list, 
+coefficient_matrix_list <- organizeEstimates(gene_coefficients_list[2:4], 
                                              terms_exact = NULL,  
-                                             terms_match = c("patternWeights", "log10UMI"),
+                                             terms_match = c("patternWeights", "sizeFactor"),
                                              feature = "estimate",
                                              transpose = T,
                                              gene_name = "gene_id")
