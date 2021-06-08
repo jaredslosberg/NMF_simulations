@@ -218,23 +218,23 @@ print(pattern_usage_plots)
 
 ```
 
-```{r glmpd, eval = T}
+```{r glmpd, eval = T, message = F, warning = F, error = F}
 
 
-model_str <- paste0("~0 + patternWeights + sizeFactor")
+model_str <- paste0("~0 + patternWeights")
 
 #specify parameters for fittings
 exp_family <- "negbinomial"
 
 pattern_wts <- colData(fake_sce) %>% as.data.frame %>% dplyr::select(starts_with("fake_pattern"))
-
-system.time(glm_models_list <- glmpd::fitGLMpd(object = fake_sce,
+#TODO: something in here is failing
+system.time(glm_models_list <- glmpd::fitGLMpd(object =fake_sce,
                                              model_formula_str = model_str,
                                              projected_patterns = pattern_wts,
                                              cores = 1, 
                                              count_assay = "counts"))
 
-extracted_coefficients_list <- extractCoefficients(glm_models = glm_models_list, genes = rownames(fake_sce))
+extracted_coefficients_list <- extractCoefficients(glm_models = glm_models_list, genes = rownames(noisy_sce))
 
 gene_coefficients_list <- orderCoefficientsByGene(extracted_coefficients_list, filter_significance = NULL, string = NULL)
 
@@ -244,5 +244,45 @@ coefficient_matrix_list <- organizeEstimates(gene_coefficients_list[2:4],
                                              feature = "estimate",
                                              transpose = T,
                                              gene_name = "gene_id")
+```
+```{r}
+heatmap_list <- purrr::map(names(coefficient_matrix_list), function(pattern_name){
+  
+  #FIRST HEATMAP, clustering of columns based on this one
+  term <- "patternWeights"
+  
+  #extract dataframe of estimates for this pattern, for this set of parameters. Rows are parameters, columns are genes
+  match <- coefficient_matrix_list %>% purrr::pluck(pattern_name, term)
+  
+  ##order rows here, but they already alphabetical. 
+  rownames(match) <- term
+  
+  #show gene_names if less than some number of genes
+  do.show.col.names <- T
+  
+  hm1 <- ComplexHeatmap::Heatmap(match, name = paste0(term, ": ", pattern_name), cluster_rows = F, cluster_columns = F)
+  
+   #SECOND HEATMAP
+  term <- "sizeFactor"
+  
+  #extract dataframe of estimates for this pattern, for this set of parameters. Rows are parameters, columns are genes
+  match2<- coefficient_matrix_list %>% purrr::pluck(pattern_name, term)
+  
+  ##order rows here, but they already alphabetical. 
+ rownames(match2) <- term
+ colnames(match2) <- c("gene1", rep("",398), "gene400")
+  
+  hm2 <- ComplexHeatmap::Heatmap(match2, name = paste0(term, ": ", pattern_name), cluster_rows = F,
+                                 cluster_columns = F, show_column_names = do.show.col.names)
+  
+ 
+  #vertical heatmap merging
+  heatmap_merge <- hm1  %v% hm2
+  
+  return(heatmap_merge)
+  
+})
+
+heatmap_list
 ```
 
