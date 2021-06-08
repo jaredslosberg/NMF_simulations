@@ -21,7 +21,9 @@ library(dplyr)
 library(purrr)
 library(stringr)
 library(monocle3)
-library(glmpd)
+# library(glmpd)\
+
+devtools::load_all("/data/users/jared/glmpd/")
 
 
 ```
@@ -89,7 +91,7 @@ createCellWeights <- function(num_patterns, num_patterns_used, num_cells_per_pat
 no_patterns <- 4
 no_patterns_used <- 2
 
-no_cells_per_pattern <- 20
+no_cells_per_pattern <- 50
 total_cells <- no_patterns * no_cells_per_pattern
 no_genes_per_pattern <- 100
 total_genes <- no_patterns * no_genes_per_pattern
@@ -221,14 +223,17 @@ print(pattern_usage_plots)
 ```{r glmpd, eval = T, message = F, warning = F, error = F}
 
 
-model_str <- paste0("~0 + patternWeights")
+model_str <- paste0("~0 + patternWeights + sizeFactor")
 
 #specify parameters for fittings
 exp_family <- "negbinomial"
 
-pattern_wts <- colData(fake_sce) %>% as.data.frame %>% dplyr::select(starts_with("fake_pattern"))
+pattern_wts <- colData(noisy_sce) %>%
+  as.data.frame %>%
+  dplyr::select(starts_with("fake_pattern"))
+
 #TODO: something in here is failing
-system.time(glm_models_list <- glmpd::fitGLMpd(object =fake_sce,
+system.time(glm_models_list <- glmpd::fitGLMpd(object =noisy_sce,
                                              model_formula_str = model_str,
                                              projected_patterns = pattern_wts,
                                              cores = 1, 
@@ -238,13 +243,14 @@ extracted_coefficients_list <- extractCoefficients(glm_models = glm_models_list,
 
 gene_coefficients_list <- orderCoefficientsByGene(extracted_coefficients_list, filter_significance = NULL, string = NULL)
 
-coefficient_matrix_list <- organizeEstimates(gene_coefficients_list[2:4], 
+coefficient_matrix_list <- organizeEstimates(gene_coefficients_list[1:4], 
                                              terms_exact = NULL,  
                                              terms_match = c("patternWeights", "sizeFactor"),
                                              feature = "estimate",
                                              transpose = T,
                                              gene_name = "gene_id")
 ```
+
 ```{r}
 heatmap_list <- purrr::map(names(coefficient_matrix_list), function(pattern_name){
   
@@ -268,12 +274,14 @@ heatmap_list <- purrr::map(names(coefficient_matrix_list), function(pattern_name
   #extract dataframe of estimates for this pattern, for this set of parameters. Rows are parameters, columns are genes
   match2<- coefficient_matrix_list %>% purrr::pluck(pattern_name, term)
   
+  col_scale <- circlize::colorRamp2(quantile(match2, c(0.01,0.99)), colors = c("yellow","orange"))
+  
   ##order rows here, but they already alphabetical. 
  rownames(match2) <- term
- colnames(match2) <- c("gene1", rep("",398), "gene400")
+ # colnames(match2) <- c("gene1", rep("",398), "gene400")
   
   hm2 <- ComplexHeatmap::Heatmap(match2, name = paste0(term, ": ", pattern_name), cluster_rows = F,
-                                 cluster_columns = F, show_column_names = do.show.col.names)
+                                 cluster_columns = F, show_column_names = do.show.col.names, col = col_scale)
   
  
   #vertical heatmap merging
@@ -284,5 +292,31 @@ heatmap_list <- purrr::map(names(coefficient_matrix_list), function(pattern_name
 })
 
 heatmap_list
+```
+
+```{r}
+gene_name <- "gene1"
+
+
+pattern_name <- paste0("fake_pattern", 1:no_patterns)
+
+log_counts <- log(counts(noisy_sce)[gene_name,])
+
+
+
+map(pattern_name, function(patt){
+  pattern_usage <- colData(noisy_sce)[,patt]
+  
+  y_int <- coefficient_matrix_list[[patt]] %>% pluck("sizeFactor") %>% .[,gene_name]
+  
+  m <- coefficient_matrix_list[[patt]] %>% pluck("patternWeights") %>% .[,gene_name]
+  
+  
+  p <- qplot(pattern_usage, log_counts, color = 1:total_cells) +
+    labs(color = "cell number", x = paste0(pattern_name," usage"), y = paste0("log(counts) for ",gene_name)) +
+    geom_abline(intercept = y_int, slope = m) +
+    scale_color_viridis()
+})
+
 ```
 
